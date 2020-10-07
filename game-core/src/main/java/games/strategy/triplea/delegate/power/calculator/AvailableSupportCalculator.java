@@ -34,7 +34,7 @@ public class AvailableSupportCalculator {
   }
 
   /** Sorts 'supportsAvailable' lists based on unit support attachment rules. */
-  public static SupportCalculationResult getSortedSupport(
+  static SupportCalculationResult getSortedSupport(
       final Collection<Unit> unitsGivingTheSupport,
       final Set<UnitSupportAttachment> rules,
       final boolean defence,
@@ -61,7 +61,7 @@ public class AvailableSupportCalculator {
    * @param defence are the receiving units defending?
    * @param allies are the receiving units allied to the giving units?
    */
-  private static SupportCalculationResult getSupport(
+  public static SupportCalculationResult getSupport(
       final Collection<Unit> unitsGivingTheSupport,
       final Set<UnitSupportAttachment> rules,
       final boolean defence,
