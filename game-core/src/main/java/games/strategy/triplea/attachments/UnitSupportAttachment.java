@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import lombok.Value;
 
 /**
@@ -294,6 +295,7 @@ public class UnitSupportAttachment extends DefaultAttachment {
     impArtTech = false;
   }
 
+  @Nullable
   public Set<UnitType> getUnitType() {
     return unitType;
   }

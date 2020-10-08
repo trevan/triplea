@@ -2,18 +2,14 @@ package games.strategy.triplea.delegate.power.calculator;
 
 import com.google.common.annotations.VisibleForTesting;
 import games.strategy.engine.data.GameData;
-import games.strategy.engine.data.GamePlayer;
 import games.strategy.engine.data.Territory;
 import games.strategy.engine.data.TerritoryEffect;
 import games.strategy.engine.data.Unit;
-import games.strategy.triplea.Constants;
 import games.strategy.triplea.Properties;
-import games.strategy.triplea.attachments.RulesAttachment;
 import games.strategy.triplea.attachments.UnitAttachment;
 import games.strategy.triplea.attachments.UnitSupportAttachment;
 import games.strategy.triplea.delegate.Die;
 import games.strategy.triplea.delegate.Matches;
-import games.strategy.triplea.delegate.TerritoryEffectHelper;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -23,6 +19,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import lombok.AccessLevel;
 import lombok.Builder;
@@ -289,127 +287,126 @@ public class TotalPowerAndTotalRolls {
     }
 
     // Get all friendly supports
-    final SupportCalculationResult friendlySupports =
-        AvailableSupportCalculator.getSortedAaSupport(
+    final AvailableSupportTracker friendlySupportTracker =
+        AvailableSupportTracker.getSortedAaSupport(
             allFriendlyUnitsAliveOrWaitingToDie, //
-            data,
+            UnitSupportAttachment.get(data),
             defending,
             true);
 
     // Get all enemy supports
-    final SupportCalculationResult enemySupports =
-        AvailableSupportCalculator.getSortedAaSupport(
+    final AvailableSupportTracker enemySupportTracker =
+        AvailableSupportTracker.getSortedAaSupport(
             allEnemyUnitsAliveOrWaitingToDie, //
-            data,
+            UnitSupportAttachment.get(data),
             !defending,
             false);
 
     return getAaUnitPowerAndRollsForNormalBattles(
-        aaUnits, enemySupports, friendlySupports, defending, data);
+        aaUnits, enemySupportTracker, friendlySupportTracker, defending, data);
   }
 
   @VisibleForTesting
   static Map<Unit, TotalPowerAndTotalRolls> getAaUnitPowerAndRollsForNormalBattles(
       final Collection<Unit> aaUnits,
-      final SupportCalculationResult enemySupports,
-      final SupportCalculationResult friendlySupports,
+      final AvailableSupportTracker enemySupportTracker,
+      final AvailableSupportTracker friendlySupportTracker,
       final boolean defending,
       final GameData data) {
+    final Function<Unit, ValueAndSupportAllowances> getRolls = AaRollGetter.with(data);
 
-    final Set<List<UnitSupportAttachment>> supportRulesFriendly =
-        friendlySupports.getSupportRules();
-    final IntegerMap<UnitSupportAttachment> supportLeftFriendly = friendlySupports.getSupportLeft();
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftFriendly =
-        friendlySupports.getSupportUnits();
-
-    final Set<List<UnitSupportAttachment>> supportRulesEnemy = enemySupports.getSupportRules();
-    final IntegerMap<UnitSupportAttachment> supportLeftEnemy = enemySupports.getSupportLeft();
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftEnemy =
-        enemySupports.getSupportUnits();
-
-    // Copy for rolls
-    final IntegerMap<UnitSupportAttachment> supportLeftFriendlyRolls =
-        new IntegerMap<>(supportLeftFriendly);
-    final IntegerMap<UnitSupportAttachment> supportLeftEnemyRolls =
-        new IntegerMap<>(supportLeftEnemy);
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftFriendlyRolls =
-        new HashMap<>();
-    for (final UnitSupportAttachment usa : supportUnitsLeftFriendly.keySet()) {
-      supportUnitsLeftFriendlyRolls.put(usa, new IntegerMap<>(supportUnitsLeftFriendly.get(usa)));
+    final Function<Unit, ValueAndSupportAllowances> getStrength;
+    if (defending) {
+      getStrength = AaDefenseStrengthGetter.with(data);
+    } else {
+      getStrength = AaOffenseStrengthGetter.with(data);
     }
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftEnemyRolls = new HashMap<>();
-    for (final UnitSupportAttachment usa : supportUnitsLeftEnemy.keySet()) {
-      supportUnitsLeftEnemyRolls.put(usa, new IntegerMap<>(supportUnitsLeftEnemy.get(usa)));
-    }
+    // Sort units strongest to weakest to give support to the best units first
+    final List<Unit> units = new ArrayList<>(aaUnits);
+    sortAaHighToLow(units, data, defending);
+
+    return getUnitTotalPowerAndTotalRollsMap(
+        friendlySupportTracker,
+        enemySupportTracker,
+        getRolls,
+        getStrength,
+        units,
+        new HashMap<>(),
+        new HashMap<>());
+  }
+
+  private static Map<Unit, TotalPowerAndTotalRolls> getUnitTotalPowerAndTotalRollsMap(
+      final AvailableSupportTracker friendlySupportTracker,
+      final AvailableSupportTracker enemySupportTracker,
+      final Function<Unit, ValueAndSupportAllowances> getRolls,
+      final Function<Unit, ValueAndSupportAllowances> getStrength,
+      final Collection<Unit> units,
+      final Map<Unit, IntegerMap<Unit>> unitSupportPowerMap,
+      final Map<Unit, IntegerMap<Unit>> unitSupportRollsMap) {
+
+    // make copies for the strength
+    final AvailableSupportTracker friendlySupportStrengthTracker =
+        new AvailableSupportTracker(friendlySupportTracker);
+    final AvailableSupportTracker enemySupportStrengthTracker =
+        new AvailableSupportTracker(enemySupportTracker);
 
     final Map<Unit, TotalPowerAndTotalRolls> unitPowerAndRolls = new HashMap<>();
+    for (final Unit unit : units) {
 
-    // Sort units strongest to weakest to give support to the best units first
-    final List<Unit> sortedAaUnits = new ArrayList<>(aaUnits);
-    sortAaHighToLow(sortedAaUnits, data, defending);
-    for (final Unit unit : sortedAaUnits) {
-
-      // Find unit's AA strength
-      final UnitAttachment ua = UnitAttachment.get(unit.getType());
       int strength =
-          defending ? ua.getAttackAa(unit.getOwner()) : ua.getOffensiveAttackAa(unit.getOwner());
-      strength +=
-          SupportBonusCalculator.getSupport(
+          getDiceValue(
               unit,
-              supportRulesFriendly,
-              supportLeftFriendly,
-              supportUnitsLeftFriendly,
-              new HashMap<>(),
-              UnitSupportAttachment::getAaStrength);
-      strength +=
-          SupportBonusCalculator.getSupport(
-              unit,
-              supportRulesEnemy,
-              supportLeftEnemy,
-              supportUnitsLeftEnemy,
-              new HashMap<>(),
-              UnitSupportAttachment::getAaStrength);
-      strength = Math.min(Math.max(strength, 0), data.getDiceSides());
-
-      // Find unit's AA rolls
-      int rolls;
-      if (strength == 0) {
+              getStrength,
+              friendlySupportStrengthTracker,
+              enemySupportStrengthTracker,
+              unitSupportPowerMap);
+      int rolls =
+          getDiceValue(
+              unit, getRolls, friendlySupportTracker, enemySupportTracker, unitSupportRollsMap);
+      if (rolls == 0 || strength == 0) {
+        strength = 0;
         rolls = 0;
-      } else {
-        rolls = ua.getMaxAaAttacks();
-        if (rolls > -1) {
-          rolls +=
-              SupportBonusCalculator.getSupport(
-                  unit,
-                  supportRulesFriendly,
-                  supportLeftFriendlyRolls,
-                  supportUnitsLeftFriendlyRolls,
-                  new HashMap<>(),
-                  UnitSupportAttachment::getAaRoll);
-          rolls +=
-              SupportBonusCalculator.getSupport(
-                  unit,
-                  supportRulesEnemy,
-                  supportLeftEnemyRolls,
-                  supportUnitsLeftEnemyRolls,
-                  new HashMap<>(),
-                  UnitSupportAttachment::getAaRoll);
-          rolls = Math.max(0, rolls);
-        }
-        if (rolls == 0) {
-          strength = 0;
-        }
       }
 
-      unitPowerAndRolls.put(
-          unit, //
-          builder() //
-              .totalPower(strength)
-              .totalRolls(rolls)
-              .build());
+      unitPowerAndRolls.put(unit, builder().totalPower(strength).totalRolls(rolls).build());
     }
 
     return unitPowerAndRolls;
+  }
+
+  private static int getDiceValue(
+      final Unit unit,
+      final Function<Unit, ValueAndSupportAllowances> getDiceValueFromUnit,
+      final AvailableSupportTracker friendlySupportTracker,
+      final AvailableSupportTracker enemySupportTracker,
+      final Map<Unit, IntegerMap<Unit>> unitSupportMap) {
+
+    final ValueAndSupportAllowances valueAndSupportAllowances = getDiceValueFromUnit.apply(unit);
+
+    final List<AvailableSupportTracker> supportsToAdd = new ArrayList<>();
+    if (valueAndSupportAllowances.isAllowFriendly()) {
+      supportsToAdd.add(friendlySupportTracker);
+    }
+    supportsToAdd.add(enemySupportTracker);
+
+    DiceValue value = valueAndSupportAllowances.getValue();
+    for (final AvailableSupportTracker supportTracker : supportsToAdd) {
+      final Map<Unit, IntegerMap<Unit>> supportUsed =
+          supportTracker.giveSupportToUnit(unit, valueAndSupportAllowances.getSupportFilter());
+      supportUsed.forEach(
+          (key1, value1) ->
+              unitSupportMap.computeIfAbsent(key1, (key) -> new IntegerMap<>()).add(value1));
+      value = value.add(supportUsed.values().stream().mapToInt(IntegerMap::totalValues).sum());
+    }
+
+    return value.minMax();
+  }
+
+  @Value(staticConstructor = "of")
+  static class ValueAndSupportAllowances {
+    DiceValue value;
+    boolean allowFriendly;
+    Predicate<UnitSupportAttachment> supportFilter;
   }
 
   /**
@@ -461,16 +458,16 @@ public class TotalPowerAndTotalRolls {
     }
 
     // Get all friendly supports
-    final SupportCalculationResult friendlySupport =
-        AvailableSupportCalculator.getSortedSupport(
+    final AvailableSupportTracker friendlySupportTracker =
+        AvailableSupportTracker.getSortedSupport(
             allFriendlyUnitsAliveOrWaitingToDie,
             data.getUnitTypeList().getSupportRules(),
             defending,
             true);
 
     // Get all enemy supports
-    final SupportCalculationResult enemySupport =
-        AvailableSupportCalculator.getSortedSupport(
+    final AvailableSupportTracker enemySupportTracker =
+        AvailableSupportTracker.getSortedSupport(
             allEnemyUnitsAliveOrWaitingToDie,
             data.getUnitTypeList().getSupportRules(),
             !defending,
@@ -478,8 +475,8 @@ public class TotalPowerAndTotalRolls {
 
     return getUnitPowerAndRollsForNormalBattles(
         unitsGettingPowerFor,
-        enemySupport,
-        friendlySupport,
+        enemySupportTracker,
+        friendlySupportTracker,
         defending,
         data,
         Matches.territoryIsLand().test(location),
@@ -490,9 +487,9 @@ public class TotalPowerAndTotalRolls {
 
   @VisibleForTesting
   static Map<Unit, TotalPowerAndTotalRolls> getUnitPowerAndRollsForNormalBattles(
-      final Collection<Unit> unitsGettingPowerFor,
-      final SupportCalculationResult enemySupport,
-      final SupportCalculationResult friendlySupport,
+      final Collection<Unit> units,
+      final AvailableSupportTracker enemySupportTracker,
+      final AvailableSupportTracker friendlySupportTracker,
       final boolean defending,
       final GameData data,
       final boolean territoryIsLand,
@@ -500,151 +497,24 @@ public class TotalPowerAndTotalRolls {
       final Map<Unit, IntegerMap<Unit>> unitSupportPowerMap,
       final Map<Unit, IntegerMap<Unit>> unitSupportRollsMap) {
 
-    final Map<Unit, TotalPowerAndTotalRolls> unitPowerAndRolls = new HashMap<>();
-
-    final Set<List<UnitSupportAttachment>> supportRulesFriendly = friendlySupport.getSupportRules();
-    final IntegerMap<UnitSupportAttachment> supportLeftFriendly = friendlySupport.getSupportLeft();
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftFriendly =
-        friendlySupport.getSupportUnits();
-
-    final Set<List<UnitSupportAttachment>> supportRulesEnemy = enemySupport.getSupportRules();
-    final IntegerMap<UnitSupportAttachment> supportLeftEnemy = enemySupport.getSupportLeft();
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftEnemy =
-        enemySupport.getSupportUnits();
-
-    // Copy for rolls
-    final IntegerMap<UnitSupportAttachment> supportLeftFriendlyRolls =
-        new IntegerMap<>(supportLeftFriendly);
-    final IntegerMap<UnitSupportAttachment> supportLeftEnemyRolls =
-        new IntegerMap<>(supportLeftEnemy);
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftFriendlyRolls =
-        new HashMap<>();
-    for (final UnitSupportAttachment usa : supportUnitsLeftFriendly.keySet()) {
-      supportUnitsLeftFriendlyRolls.put(usa, new IntegerMap<>(supportUnitsLeftFriendly.get(usa)));
-    }
-    final Map<UnitSupportAttachment, IntegerMap<Unit>> supportUnitsLeftEnemyRolls = new HashMap<>();
-    for (final UnitSupportAttachment usa : supportUnitsLeftEnemy.keySet()) {
-      supportUnitsLeftEnemyRolls.put(usa, new IntegerMap<>(supportUnitsLeftEnemy.get(usa)));
+    final Function<Unit, ValueAndSupportAllowances> getRolls;
+    final Function<Unit, ValueAndSupportAllowances> getStrength;
+    if (defending) {
+      getRolls = NormalDefenseRollGetter.with(data);
+      getStrength = NormalDefenseStrengthGetter.with(territoryEffects, data);
+    } else {
+      getRolls = NormalOffenseRollGetter.with(data);
+      getStrength = NormalOffenseStrengthGetter.with(territoryIsLand, territoryEffects, data);
     }
 
-    for (final Unit unit : unitsGettingPowerFor) {
-
-      // Find unit's strength
-      int strength;
-      final UnitAttachment ua = UnitAttachment.get(unit.getType());
-      if (defending) {
-        strength = ua.getDefense(unit.getOwner());
-        if (isFirstTurnLimitedRoll(unit.getOwner(), data)) {
-          strength = Math.min(1, strength);
-        } else {
-          strength +=
-              SupportBonusCalculator.getSupport(
-                  unit,
-                  supportRulesFriendly,
-                  supportLeftFriendly,
-                  supportUnitsLeftFriendly,
-                  unitSupportPowerMap,
-                  UnitSupportAttachment::getStrength);
-        }
-        strength +=
-            SupportBonusCalculator.getSupport(
-                unit,
-                supportRulesEnemy,
-                supportLeftEnemy,
-                supportUnitsLeftEnemy,
-                unitSupportPowerMap,
-                UnitSupportAttachment::getStrength);
-      } else {
-        strength = ua.getAttack(unit.getOwner());
-        if (ua.getIsMarine() != 0 && unit.getWasAmphibious()) {
-          strength += ua.getIsMarine();
-        }
-        if (ua.getIsSea() && territoryIsLand) {
-          // Change the strength to be bombard, not attack/defense, because this is a bombarding
-          // naval unit
-          strength = ua.getBombard();
-        }
-        strength +=
-            SupportBonusCalculator.getSupport(
-                unit,
-                supportRulesFriendly,
-                supportLeftFriendly,
-                supportUnitsLeftFriendly,
-                unitSupportPowerMap,
-                UnitSupportAttachment::getStrength);
-        strength +=
-            SupportBonusCalculator.getSupport(
-                unit,
-                supportRulesEnemy,
-                supportLeftEnemy,
-                supportUnitsLeftEnemy,
-                unitSupportPowerMap,
-                UnitSupportAttachment::getStrength);
-      }
-      strength +=
-          TerritoryEffectHelper.getTerritoryCombatBonus(
-              unit.getType(), territoryEffects, defending);
-      strength = Math.min(Math.max(strength, 0), data.getDiceSides());
-
-      // Find unit's rolls
-      int rolls;
-      if (strength == 0) {
-        rolls = 0;
-      } else {
-        if (defending) {
-          rolls = ua.getDefenseRolls(unit.getOwner());
-        } else {
-          rolls = ua.getAttackRolls(unit.getOwner());
-        }
-        rolls +=
-            SupportBonusCalculator.getSupport(
-                unit,
-                supportRulesFriendly,
-                supportLeftFriendlyRolls,
-                supportUnitsLeftFriendlyRolls,
-                unitSupportRollsMap,
-                UnitSupportAttachment::getRoll);
-        rolls +=
-            SupportBonusCalculator.getSupport(
-                unit,
-                supportRulesEnemy,
-                supportLeftEnemyRolls,
-                supportUnitsLeftEnemyRolls,
-                unitSupportRollsMap,
-                UnitSupportAttachment::getRoll);
-        rolls = Math.max(0, rolls);
-        if (rolls == 0) {
-          strength = 0;
-        }
-      }
-
-      unitPowerAndRolls.put(unit, builder().totalPower(strength).totalRolls(rolls).build());
-    }
-
-    return unitPowerAndRolls;
-  }
-
-  private static boolean isFirstTurnLimitedRoll(final GamePlayer player, final GameData data) {
-    // If player is null, Round > 1, or player has negate rule set: return false
-    return !player.isNull()
-        && data.getSequence().getRound() == 1
-        && !isNegateDominatingFirstRoundAttack(player)
-        && isDominatingFirstRoundAttack(data.getSequence().getStep().getPlayerId());
-  }
-
-  private static boolean isNegateDominatingFirstRoundAttack(final GamePlayer player) {
-    final RulesAttachment ra =
-        (RulesAttachment) player.getAttachment(Constants.RULES_ATTACHMENT_NAME);
-    return ra != null && ra.getNegateDominatingFirstRoundAttack();
-  }
-
-  private static boolean isDominatingFirstRoundAttack(final GamePlayer player) {
-    if (player == null) {
-      return false;
-    }
-    final RulesAttachment ra =
-        (RulesAttachment) player.getAttachment(Constants.RULES_ATTACHMENT_NAME);
-    return ra != null && ra.getDominatingFirstRoundAttack();
+    return getUnitTotalPowerAndTotalRollsMap(
+        friendlySupportTracker,
+        enemySupportTracker,
+        getRolls,
+        getStrength,
+        units,
+        unitSupportPowerMap,
+        unitSupportRollsMap);
   }
 
   public static int getTotalPower(
