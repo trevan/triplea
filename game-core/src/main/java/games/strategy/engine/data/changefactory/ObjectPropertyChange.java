@@ -6,14 +6,18 @@ import games.strategy.engine.data.MutableProperty;
 import games.strategy.engine.data.Unit;
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.util.UUID;
 import lombok.AccessLevel;
 import lombok.Getter;
+import org.triplea.java.RemoveOnNextMajorRelease;
 
 /** A game data change that captures a change to an object property value. */
 public class ObjectPropertyChange extends Change {
   private static final long serialVersionUID = 4218093376094170940L;
 
-  private final Unit object;
+  @RemoveOnNextMajorRelease("Object is only used for old save games")
+  private final Unit object = null;
+
   @Getter private String property;
 
   @Getter(AccessLevel.PACKAGE)
@@ -22,20 +26,23 @@ public class ObjectPropertyChange extends Change {
   @Getter(AccessLevel.PACKAGE)
   private final Object oldValue;
 
+  private final String objectId;
+
   ObjectPropertyChange(final Unit object, final String property, final Object newValue) {
-    this.object = object;
-    this.property = property.intern();
-    this.newValue = newValue;
-    oldValue = object.getPropertyOrThrow(property).getValue();
+    this(
+        object.getId().toString(),
+        property,
+        newValue,
+        object.getPropertyOrThrow(property).getValue());
   }
 
   private ObjectPropertyChange(
-      final Unit object, final String property, final Object newValue, final Object oldValue) {
-    this.object = object;
+      final String objectId, final String property, final Object newValue, final Object oldValue) {
     // prevent multiple copies of the property names being held in the game
     this.property = property.intern();
     this.newValue = newValue;
     this.oldValue = oldValue;
+    this.objectId = objectId;
   }
 
   private void readObject(final ObjectInputStream stream)
@@ -46,13 +53,21 @@ public class ObjectPropertyChange extends Change {
 
   @Override
   public Change invert() {
-    return new ObjectPropertyChange(object, property, oldValue, newValue);
+    return new ObjectPropertyChange(objectId, property, oldValue, newValue);
   }
 
   @Override
   protected void perform(final GameData data) {
+    final Unit hydratedObject;
+    // this.object is not null when this object is loaded from an old save game
+    if (this.object != null) {
+      hydratedObject = this.object;
+    } else {
+      hydratedObject = data.getUnits().get(UUID.fromString(this.objectId));
+    }
+
     try {
-      object.getPropertyOrThrow(property).setValue(newValue);
+      hydratedObject.getPropertyOrThrow(property).setValue(newValue);
     } catch (final MutableProperty.InvalidValueException e) {
       throw new IllegalStateException(
           String.format(
@@ -65,7 +80,7 @@ public class ObjectPropertyChange extends Change {
   @Override
   public String toString() {
     return "Property change, unit:"
-        + object
+        + objectId
         + " property:"
         + property
         + " newValue:"
